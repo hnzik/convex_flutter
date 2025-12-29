@@ -209,19 +209,16 @@ class WebConvexClient implements ConvexClientInterface {
 
   @override
   Future<void> setAuth({required String? token}) async {
+    if (token == null) {
+      return;
+    }
     _currentToken = token;
 
-    if (token == null) {
-      _client.clearAuth();
-    } else {
-      // Create a token fetcher function that returns the token
-      // Parameter is JSAny? to avoid type conversion issues with JS booleans
-      JSAny? tokenFetcher(JSAny? forceRefresh) {
-        return _currentToken?.toJS;
-      }
-
-      _client.setAuth(tokenFetcher.toJS, null);
+    JSAny? tokenFetcher(JSAny? forceRefresh) {
+      return _currentToken?.toJS;
     }
+
+    _client.setAuth(tokenFetcher.toJS, null);
   }
 
   /// Convert an error to a Dart exception.
