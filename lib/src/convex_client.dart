@@ -1,10 +1,19 @@
-import 'package:convex_flutter/convex_flutter.dart';
-import 'package:convex_flutter/src/utils.dart';
+import 'convex_client_interface.dart';
+import 'subscription_handle.dart';
+
+// Conditional imports for platform-specific implementations
+import 'convex_client_stub.dart'
+    if (dart.library.io) 'convex_client_native.dart'
+    if (dart.library.js_interop) 'convex_client_web.dart';
 
 /// A client for interacting with a Convex backend service.
 ///
 /// The ConvexClient provides methods for executing queries, mutations, actions and
 /// managing real-time subscriptions with a Convex backend.
+///
+/// This client automatically uses the appropriate implementation based on the platform:
+/// - Native platforms (iOS, Android, macOS, Windows, Linux): Uses Rust FFI
+/// - Web: Uses JavaScript interop with the convex-js library
 ///
 /// Example usage:
 ///
@@ -45,14 +54,20 @@ import 'package:convex_flutter/src/utils.dart';
 /// // Cancel subscription when done
 /// subscription.cancel();
 /// ```
-/// A client class for interacting with Convex backend services
-/// Implements singleton pattern to ensure only one instance exists
+///
+/// ## Web Setup
+///
+/// For web support, include the Convex browser bundle in your `web/index.html`:
+///
+/// ```html
+/// <script src="https://unpkg.com/convex@latest/dist/browser.bundle.js"></script>
+/// ```
 class ConvexClient {
   /// Private static instance for singleton pattern
   static ConvexClient? _instance;
 
-  /// The underlying mobile client that handles communication with Convex
-  late final MobileConvexClient _client;
+  /// The underlying platform-specific client
+  late final ConvexClientInterface _client;
 
   /// Public getter to access singleton instance
   /// Throws if accessed before initialization
@@ -70,56 +85,44 @@ class ConvexClient {
     required String clientId,
   }) async {
     if (_instance == null) {
-      // Initialize Rust FFI library
-      await RustLib.init();
-
-      // Create new mobile client instance
-      final client = MobileConvexClient(
-        deploymentUrl: deploymentUrl,
-        clientId: clientId,
-      );
-
-      // Create singleton instance
+      final client = await createPlatformClient(deploymentUrl, clientId);
       _instance = ConvexClient._internal(client);
     }
     return _instance!;
   }
 
   /// Private constructor to prevent direct instantiation
-  /// Takes the mobile client instance
   ConvexClient._internal(this._client);
 
   /// Executes a Convex query operation
   ///
   /// [name] - Name of the query function to execute
-  /// [args] - Map of arguments to pass to the query
+  /// [args] - Map of arguments to pass to the query (null values are stripped)
   ///
   /// Returns the query result as a JSON string
-  Future<String> query(String name, Map<String, String> args) async {
-    final formattedArgs = buildArgs(args);
-    return await _client.query(name: name, args: formattedArgs);
+  Future<String> query(String name, Map<String, dynamic> args) async {
+    return await _client.query(name, args);
   }
 
   /// Creates a real-time subscription to a Convex query
   ///
   /// [name] - Name of the query function to subscribe to
-  /// [args] - Map of arguments for the subscription
+  /// [args] - Map of arguments for the subscription (null values are stripped)
   /// [onUpdate] - Callback function called when new data arrives
   /// [onError] - Callback function called when an error occurs
   ///
   /// Returns a handle that can be used to manage the subscription
   Future<SubscriptionHandle> subscribe({
     required String name,
-    required Map<String, String> args,
+    required Map<String, dynamic> args,
     required void Function(String) onUpdate,
     required void Function(String, String?) onError,
   }) async {
-    final formattedArgs = buildArgs(args);
     return await _client.subscribe(
       name: name,
-      args: formattedArgs,
-      onUpdate: (value) => onUpdate(value),
-      onError: (message, value) => onError(message, value),
+      args: args,
+      onUpdate: onUpdate,
+      onError: onError,
     );
   }
 
@@ -133,8 +136,7 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
-    final formattedArgs = buildArgs(args);
-    return await _client.mutation(name: name, args: formattedArgs);
+    return await _client.mutation(name: name, args: args);
   }
 
   /// Executes a Convex action operation
@@ -147,8 +149,7 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
-    final formattedArgs = buildArgs(args);
-    return await _client.action(name: name, args: formattedArgs);
+    return await _client.action(name: name, args: args);
   }
 
   /// Sets the authentication token for the client
