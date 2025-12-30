@@ -239,30 +239,37 @@ class WebConvexClient implements ConvexClientInterface {
 
   /// Fetch token via callback, returning a Future for proper JS Promise conversion.
   Future<JSAny?> _fetchTokenAsJSPromise() async {
-    final callback = _authErrorCallback;
-    if (callback == null) {
+    try {
+      final callback = _authErrorCallback;
+      if (callback == null) {
+        return _currentToken?.toJS;
+      }
+
+      final error = AuthError(
+        errorMessage: 'Token refresh requested',
+        baseVersion: null,
+      );
+
+      final action = await callback(error);
+
+      switch (action) {
+        case AuthErrorAction_RefreshToken(:final token):
+          _currentToken = token;
+          return token.toJS;
+        case AuthErrorAction_ClearAuth():
+          _currentToken = null;
+          _client.clearAuth();
+          return null;
+        case AuthErrorAction_Disconnect():
+          _currentToken = null;
+          _client.clearAuth();
+          return null;
+      }
+    } catch (e) {
+      // On error, return the current token if available, otherwise null.
+      // This prevents Dart from trying to box non-Dart objects (like Rust FFI errors)
+      // when the Promise rejects.
       return _currentToken?.toJS;
-    }
-
-    final error = AuthError(
-      errorMessage: 'Token refresh requested',
-      baseVersion: null,
-    );
-
-    final action = await callback(error);
-
-    switch (action) {
-      case AuthErrorAction_RefreshToken(:final token):
-        _currentToken = token;
-        return token.toJS;
-      case AuthErrorAction_ClearAuth():
-        _currentToken = null;
-        _client.clearAuth();
-        return null;
-      case AuthErrorAction_Disconnect():
-        _currentToken = null;
-        _client.clearAuth();
-        return null;
     }
   }
 
