@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'convex_client_interface.dart';
 import 'subscription_handle.dart';
 
@@ -65,6 +68,15 @@ import 'convex_client_stub.dart'
 class ConvexClient {
   /// Private static instance for singleton pattern
   static ConvexClient? _instance;
+  static Future<ConvexClient>? _initFuture;
+  static String? _initializedDeploymentUrl;
+  static String? _initializedClientId;
+
+  final StreamController<AuthExpiredException> _authExpiredController =
+      StreamController<AuthExpiredException>.broadcast();
+  Timer? _authExpiryTimer;
+  DateTime? _authTokenExpiresAt;
+  bool _authExpiredNotified = false;
 
   /// The underlying platform-specific client
   late final ConvexClientInterface _client;
@@ -72,6 +84,9 @@ class ConvexClient {
   /// Public getter to access singleton instance
   /// Throws if accessed before initialization
   static ConvexClient get instance => _instance!;
+
+  /// Stream that emits an AuthExpiredException when the current auth token expires.
+  Stream<AuthExpiredException> get authExpired => _authExpiredController.stream;
 
   /// Initializes the ConvexClient singleton instance
   ///
@@ -84,11 +99,49 @@ class ConvexClient {
     required String deploymentUrl,
     required String clientId,
   }) async {
-    if (_instance == null) {
+    if (_instance != null) {
+      _assertMatchingConfig(deploymentUrl, clientId);
+      return _instance!;
+    }
+    if (_initFuture != null) {
+      _assertMatchingConfig(deploymentUrl, clientId);
+      return _initFuture!;
+    }
+    _initializedDeploymentUrl = deploymentUrl;
+    _initializedClientId = clientId;
+    _initFuture = _initialize(deploymentUrl, clientId);
+    return _initFuture!;
+  }
+
+  static Future<ConvexClient> _initialize(
+    String deploymentUrl,
+    String clientId,
+  ) async {
+    try {
       final client = await createPlatformClient(deploymentUrl, clientId);
       _instance = ConvexClient._internal(client);
+      return _instance!;
+    } catch (e) {
+      _initFuture = null;
+      _initializedDeploymentUrl = null;
+      _initializedClientId = null;
+      rethrow;
     }
-    return _instance!;
+  }
+
+  static void _assertMatchingConfig(String deploymentUrl, String clientId) {
+    if (_initializedDeploymentUrl == null && _initializedClientId == null) {
+      return;
+    }
+    if (_initializedDeploymentUrl != deploymentUrl ||
+        _initializedClientId != clientId) {
+      throw StateError(
+        'ConvexClient.init called more than once with different configuration. '
+        'Existing: deploymentUrl=$_initializedDeploymentUrl, '
+        'clientId=$_initializedClientId. '
+        'New: deploymentUrl=$deploymentUrl, clientId=$clientId.',
+      );
+    }
   }
 
   /// Private constructor to prevent direct instantiation
@@ -101,6 +154,7 @@ class ConvexClient {
   ///
   /// Returns the query result as a JSON string
   Future<String> query(String name, Map<String, dynamic> args) async {
+    _assertAuthValid();
     return await _client.query(name, args);
   }
 
@@ -118,6 +172,7 @@ class ConvexClient {
     required void Function(String) onUpdate,
     required void Function(String, String?) onError,
   }) async {
+    _assertAuthValid();
     return await _client.subscribe(
       name: name,
       args: args,
@@ -136,6 +191,7 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
+    _assertAuthValid();
     return await _client.mutation(name: name, args: args);
   }
 
@@ -149,6 +205,7 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
+    _assertAuthValid();
     return await _client.action(name: name, args: args);
   }
 
@@ -158,6 +215,92 @@ class ConvexClient {
   ///
   /// Used to authenticate requests to the Convex backend
   Future<void> setAuth({required String? token}) async {
+    _updateAuthToken(token);
     return await _client.setAuth(token: token);
   }
+
+  void _updateAuthToken(String? token) {
+    _authExpiryTimer?.cancel();
+    _authExpiryTimer = null;
+    _authTokenExpiresAt = null;
+    _authExpiredNotified = false;
+
+    if (token == null) {
+      return;
+    }
+
+    final expiresAt = _parseJwtExpiration(token);
+    if (expiresAt == null) {
+      return;
+    }
+
+    _authTokenExpiresAt = expiresAt;
+    final delay = expiresAt.difference(DateTime.now().toUtc());
+    if (delay <= Duration.zero) {
+      _emitAuthExpired(expiresAt);
+      return;
+    }
+    _authExpiryTimer = Timer(delay, () {
+      _emitAuthExpired(expiresAt);
+    });
+  }
+
+  void _assertAuthValid() {
+    final expiresAt = _authTokenExpiresAt;
+    if (expiresAt == null) {
+      return;
+    }
+    if (DateTime.now().toUtc().isAfter(expiresAt)) {
+      _emitAuthExpired(expiresAt);
+      throw AuthExpiredException(expiresAt);
+    }
+  }
+
+  void _emitAuthExpired(DateTime expiresAt) {
+    if (_authExpiredNotified) {
+      return;
+    }
+    _authExpiredNotified = true;
+    _authExpiredController.addError(AuthExpiredException(expiresAt));
+  }
+
+  DateTime? _parseJwtExpiration(String token) {
+    try {
+      final parts = token.split('.');
+      if (parts.length < 2) {
+        return null;
+      }
+      final payload = base64Url.normalize(parts[1]);
+      final decoded = utf8.decode(base64Url.decode(payload));
+      final data = jsonDecode(decoded);
+      if (data is! Map<String, dynamic>) {
+        return null;
+      }
+      final exp = data['exp'];
+      final expSeconds = exp is int
+          ? exp
+          : exp is num
+          ? exp.toInt()
+          : int.tryParse(exp?.toString() ?? '');
+      if (expSeconds == null) {
+        return null;
+      }
+      return DateTime.fromMillisecondsSinceEpoch(
+        expSeconds * 1000,
+        isUtc: true,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// Thrown when the current auth token has expired.
+class AuthExpiredException implements Exception {
+  final DateTime expiredAt;
+
+  AuthExpiredException(this.expiredAt);
+
+  @override
+  String toString() => 'AuthExpiredException: token expired at $expiredAt';
 }

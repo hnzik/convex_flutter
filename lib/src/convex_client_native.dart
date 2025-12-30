@@ -2,6 +2,12 @@ import 'convex_client_interface.dart';
 import 'subscription_handle.dart';
 import 'utils.dart';
 import 'rust/lib.dart' as rust;
+import 'rust/lib.dart'
+    show
+        ClientError,
+        ClientError_InternalError,
+        ClientError_ConvexError,
+        ClientError_ServerError;
 import 'rust/frb_generated.dart';
 
 /// Native (Rust FFI) implementation of the Convex client.
@@ -31,7 +37,11 @@ class NativeConvexClient implements ConvexClientInterface {
   @override
   Future<String> query(String name, Map<String, dynamic> args) async {
     final formattedArgs = buildArgs(args);
-    return await _client.query(name: name, args: formattedArgs);
+    try {
+      return await _client.query(name: name, args: formattedArgs);
+    } on ClientError catch (e) {
+      throw _convertError(e);
+    }
   }
 
   @override
@@ -48,6 +58,7 @@ class NativeConvexClient implements ConvexClientInterface {
       onUpdate: (value) => onUpdate(value),
       onError: (message, value) => onError(message, value),
     );
+
     return NativeSubscriptionHandle(handle);
   }
 
@@ -57,7 +68,11 @@ class NativeConvexClient implements ConvexClientInterface {
     required Map<String, dynamic> args,
   }) async {
     final formattedArgs = buildArgs(args);
-    return await _client.mutation(name: name, args: formattedArgs);
+    try {
+      return await _client.mutation(name: name, args: formattedArgs);
+    } on ClientError catch (e) {
+      throw _convertError(e);
+    }
   }
 
   @override
@@ -66,12 +81,25 @@ class NativeConvexClient implements ConvexClientInterface {
     required Map<String, dynamic> args,
   }) async {
     final formattedArgs = buildArgs(args);
-    return await _client.action(name: name, args: formattedArgs);
+    try {
+      return await _client.action(name: name, args: formattedArgs);
+    } on ClientError catch (e) {
+      throw _convertError(e);
+    }
   }
 
   @override
   Future<void> setAuth({required String? token}) async {
     return await _client.setAuth(token: token);
+  }
+
+  /// Convert a ClientError to a Dart exception.
+  Exception _convertError(ClientError error) {
+    return switch (error) {
+      ClientError_InternalError(:final msg) => Exception('InternalError: $msg'),
+      ClientError_ConvexError(:final data) => Exception('ConvexError: $data'),
+      ClientError_ServerError(:final msg) => Exception('ServerError: $msg'),
+    };
   }
 }
 

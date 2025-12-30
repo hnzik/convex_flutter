@@ -2,26 +2,27 @@ mod frb_generated;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
+    time::Duration,
 };
 
-#[cfg(debug_assertions)]
 use android_logger::Config;
-use async_once_cell::OnceCell;
+use once_cell::sync::OnceCell;
 use convex::{
     ConvexClient,
     ConvexClientBuilder,
     FunctionResult,
-    Value, // Convex client and result types
+    Value,
 };
 use flutter_rust_bridge::{frb, DartFnFuture};
 use futures::{
     channel::oneshot::{self, Sender},
     pin_mut, select_biased, FutureExt, StreamExt,
 };
-use log::debug; // Logging for debugging purposes
-#[cfg(debug_assertions)]
-use log::LevelFilter;
+use log::{debug, LevelFilter};
 use parking_lot::Mutex;
+use rustls::crypto::ring;
+#[cfg(target_os = "android")]
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // Custom error type for Convex client operations, exposed to Dart.
 #[derive(Debug, thiserror::Error)]
@@ -118,7 +119,7 @@ impl QuerySubscriber for CallbackSubscriberDartFn {
 pub struct MobileConvexClient {
     deployment_url: String,         // URL of the Convex deployment
     client_id: String,              // Client ID for authentication
-    client: OnceCell<ConvexClient>, // Lazy-initialized Convex client
+    client: OnceCell<Arc<tokio::sync::Mutex<ConvexClient>>>, // Lazy-initialized Convex client
     rt: tokio::runtime::Runtime,    // Tokio runtime for async operations
 }
 
@@ -126,8 +127,31 @@ impl MobileConvexClient {
     /// Creates a new MobileConvexClient instance with the given deployment URL and client ID.
     #[frb(sync)]
     pub fn new(deployment_url: String, client_id: String) -> MobileConvexClient {
-        #[cfg(debug_assertions)]
-        android_logger::init_once(Config::default().with_max_level(LevelFilter::Error));
+        // Initialize logger for Android (works in both debug and release)
+        android_logger::init_once(Config::default().with_max_level(LevelFilter::Debug));
+
+        let _ = ring::default_provider().install_default();
+
+        // Initialize tracing for convex crate debug output
+        #[cfg(target_os = "android")]
+        {
+            // On Android, output to logcat via tracing-android
+            let _ = tracing_subscriber::registry()
+                .with(tracing_android::layer("convex_flutter").unwrap())
+                .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+                .try_init();
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            // On other platforms, use default subscriber
+            let _ = tracing_subscriber::fmt()
+                .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
+                .try_init();
+        }
+
+        log::error!("[CONVEX] Tracing initialized");
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -141,21 +165,34 @@ impl MobileConvexClient {
     }
 
     /// Retrieves or initializes a connected Convex client.
-    async fn connected_client(&self) -> anyhow::Result<ConvexClient> {
-        let url = self.deployment_url.clone();
+    fn connected_client(&self) -> anyhow::Result<Arc<tokio::sync::Mutex<ConvexClient>>> {
+        // Use get_or_try_init to initialize once
         self.client
-            .get_or_try_init(async {
-                let client_id = self.client_id.to_owned();
-                self.rt
-                    .spawn(async move {
-                        ConvexClientBuilder::new(url.as_str())
+            .get_or_try_init(|| {
+                let url = self.deployment_url.clone();
+                let client_id = self.client_id.clone();
+                let rt_handle = self.rt.handle().clone();
+
+                // Use block_in_place to allow blocking from async context,
+                // then run on our dedicated runtime
+                tokio::task::block_in_place(|| {
+                    rt_handle.block_on(async move {
+                        log::error!("[CONVEX] Building ConvexClient...");
+                        let client = ConvexClientBuilder::new(url.as_str())
                             .with_client_id(&client_id)
                             .build()
-                            .await
+                            .await?;
+                        log::error!("[CONVEX] ConvexClient built");
+
+                        // Give the WebSocket a moment to establish connection
+                        log::error!("[CONVEX] Waiting for WebSocket to establish...");
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        log::error!("[CONVEX] Client ready");
+
+                        Ok::<_, anyhow::Error>(Arc::new(tokio::sync::Mutex::new(client)))
                     })
-                    .await?
+                })
             })
-            .await
             .map(|client_ref| client_ref.clone())
     }
 
@@ -166,10 +203,18 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> Result<String, ClientError> {
-        let mut client = self.connected_client().await?;
-        debug!("got the client");
-        let result = client.query(name.as_str(), parse_json_args(args)).await?;
-        debug!("got the result");
+        log::error!("[CONVEX] query() called for: {}", name);
+        let client = self.connected_client()?;
+        log::error!("[CONVEX] query() got client for: {}", name);
+        let name_clone = name.clone();
+        let result = self.rt
+            .spawn(async move {
+                let mut client = client.lock().await;
+                client.query(name_clone.as_str(), parse_json_args(args)).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error: {:?}", e))??;
+        log::error!("[CONVEX] query() got result for: {}", name);
         handle_direct_function_result(result)
     }
 
@@ -182,13 +227,14 @@ impl MobileConvexClient {
         on_update: impl Fn(String) -> DartFnFuture<()> + Send + Sync + 'static,
         on_error: impl Fn(String, Option<String>) -> DartFnFuture<()> + Send + Sync + 'static,
     ) -> Result<SubscriptionHandle, ClientError> {
+        log::error!("[CONVEX] subscribe() called for: {}", name);
         let subscriber = Arc::new(CallbackSubscriberDartFn {
             on_update: Box::new(on_update),
             on_error: Box::new(on_error),
         });
-        self.internal_subscribe(name, args, subscriber)
-            .await
-            .map_err(Into::into)
+        let result = self.internal_subscribe(name.clone(), args, subscriber).await;
+        log::error!("[CONVEX] subscribe() completed for: {}, success: {}", name, result.is_ok());
+        result.map_err(Into::into)
     }
 
     /// Internal method for subscription logic.
@@ -198,44 +244,76 @@ impl MobileConvexClient {
         args: HashMap<String, String>,
         subscriber: Arc<dyn QuerySubscriber>,
     ) -> anyhow::Result<SubscriptionHandle> {
-        let mut client = self.connected_client().await?;
-        debug!("New subscription");
-        let mut subscription = client
-            .subscribe(name.as_str(), parse_json_args(args))
-            .await?;
+        log::error!("[CONVEX] internal_subscribe - getting client for: {}", name);
+        let client = self.connected_client()?;
+        log::error!("[CONVEX] internal_subscribe - got client for: {}", name);
+
         let (cancel_sender, cancel_receiver) = oneshot::channel::<()>();
+        let sub_name = name.clone();
+        let parsed_args = parse_json_args(args);
+
+        // Spawn EVERYTHING on self.rt - subscription creation AND the loop
         self.rt.spawn(async move {
+            log::error!("[CONVEX] Inside rt.spawn - creating subscription for: {}", sub_name);
+
+            // Create subscription while holding the lock, then release it
+            let mut subscription = {
+                let mut client_guard = client.lock().await;
+                match client_guard.subscribe(&sub_name, parsed_args).await {
+                    Ok(sub) => {
+                        log::error!("[CONVEX] Subscription created successfully for: {}", sub_name);
+                        sub
+                    }
+                    Err(e) => {
+                        log::error!("[CONVEX] Failed to create subscription for {}: {:?}", sub_name, e);
+                        subscriber.on_error(format!("Failed to subscribe: {:?}", e), None);
+                        return;
+                    }
+                }
+            };
+            // Lock is released here, subscription is independent
+
+            log::error!("[CONVEX] Subscription loop started for: {}", sub_name);
             let cancel_fut = cancel_receiver.fuse();
             pin_mut!(cancel_fut);
             loop {
+                log::error!("[CONVEX] Waiting for next value for: {}", sub_name);
                 select_biased! {
                     new_val = subscription.next().fuse() => {
+                        log::error!("[CONVEX] Got value from subscription: {}", sub_name);
                         let new_val = new_val.expect("Client dropped prematurely");
                         match new_val {
                             FunctionResult::Value(value) => {
-                                debug!("Updating with {value:?}");
+                                log::error!("[CONVEX] Value received for: {}", sub_name);
                                 subscriber.on_update(serde_json::to_string(
                                     &serde_json::Value::from(value),
                                 ).unwrap());
                             }
                             FunctionResult::ErrorMessage(message) => {
+                                log::error!("[CONVEX] ErrorMessage for {}: {}", sub_name, message);
                                 subscriber.on_error(message, None);
                             }
-                            FunctionResult::ConvexError(error) => subscriber.on_error(
-                                error.message,
-                                Some(serde_json::ser::to_string(
-                                    &serde_json::Value::from(error.data),
-                                ).unwrap()),
-                            ),
+                            FunctionResult::ConvexError(error) => {
+                                log::error!("[CONVEX] ConvexError for {}: {}", sub_name, error.message);
+                                subscriber.on_error(
+                                    error.message,
+                                    Some(serde_json::ser::to_string(
+                                        &serde_json::Value::from(error.data),
+                                    ).unwrap()),
+                                );
+                            }
                         }
                     }
                     _ = cancel_fut => {
+                        log::error!("[CONVEX] Subscription cancelled: {}", sub_name);
                         break;
                     }
                 }
             }
-            debug!("Subscription canceled");
+            log::error!("[CONVEX] Subscription loop ended: {}", sub_name);
         });
+
+        log::error!("[CONVEX] internal_subscribe - returning handle for: {}", name);
         Ok(SubscriptionHandle::new(cancel_sender))
     }
 
@@ -256,10 +334,14 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> anyhow::Result<FunctionResult> {
-        let mut client = self.connected_client().await?;
+        let client = self.connected_client()?;
         self.rt
-            .spawn(async move { client.mutation(&name, parse_json_args(args)).await })
-            .await?
+            .spawn(async move {
+                let mut client_guard = client.lock().await;
+                client_guard.mutation(&name, parse_json_args(args)).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error: {:?}", e))?
     }
 
     /// Executes an action on the Convex backend.
@@ -281,11 +363,15 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> anyhow::Result<FunctionResult> {
-        let mut client = self.connected_client().await?;
+        let client = self.connected_client()?;
         debug!("Running action: {}", name);
         self.rt
-            .spawn(async move { client.action(&name, parse_json_args(args)).await })
-            .await?
+            .spawn(async move {
+                let mut client_guard = client.lock().await;
+                client_guard.action(&name, parse_json_args(args)).await
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error: {:?}", e))?
     }
 
     /// Sets authentication token for the client.
@@ -296,11 +382,15 @@ impl MobileConvexClient {
 
     /// Internal method for setting authentication.
     async fn internal_set_auth(&self, token: Option<String>) -> anyhow::Result<()> {
-        let mut client = self.connected_client().await?;
+        let client = self.connected_client()?;
         self.rt
-            .spawn(async move { client.set_auth(token).await })
+            .spawn(async move {
+                let mut client_guard = client.lock().await;
+                client_guard.set_auth(token).await
+            })
             .await
-            .map_err(|e| e.into())
+            .map_err(|e| anyhow::anyhow!("Join error: {:?}", e))?;
+        Ok(())
     }
 }
 

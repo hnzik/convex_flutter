@@ -8,7 +8,16 @@
       "Bash(dart analyze:*)",
       "Bash(flutter test:*)",
       "WebFetch(domain:unpkg.com)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(cargo clean:*)",
+      "Bash(cargo build:*)",
+      "WebSearch",
+      "WebFetch(domain:crates.io)",
+      "Bash(cargo search:*)",
+      "Bash(flutter_rust_bridge_codegen generate:*)",
+      "Bash(cargo install:*)",
+      "Bash(flutter clean:*)"
     ]
   }
 }
