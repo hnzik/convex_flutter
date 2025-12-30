@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'convex_client_interface.dart';
 import 'subscription_handle.dart';
@@ -76,12 +75,6 @@ class ConvexClient {
   static String? _initializedDeploymentUrl;
   static String? _initializedClientId;
 
-  final StreamController<AuthExpiredException> _authExpiredController =
-      StreamController<AuthExpiredException>.broadcast();
-  Timer? _authExpiryTimer;
-  DateTime? _authTokenExpiresAt;
-  bool _authExpiredNotified = false;
-
   /// The underlying platform-specific client
   late final ConvexClientInterface _client;
 
@@ -90,7 +83,6 @@ class ConvexClient {
   static ConvexClient get instance => _instance!;
 
   /// Stream that emits an AuthExpiredException when the current auth token expires.
-  Stream<AuthExpiredException> get authExpired => _authExpiredController.stream;
 
   /// Initializes the ConvexClient singleton instance
   ///
@@ -176,18 +168,11 @@ class ConvexClient {
     required void Function(String) onUpdate,
     required void Function(String, String?) onError,
   }) async {
-    //_assertAuthValid();
     return await _client.subscribe(
       name: name,
       args: args,
       onUpdate: onUpdate,
       onError: (message, value) {
-        // Intercept auth expiration errors from native side
-        if (message == 'AUTH_EXPIRED') {
-          final expiresAt = _authTokenExpiresAt ?? DateTime.now().toUtc();
-          _emitAuthExpired(expiresAt);
-          return;
-        }
         onError(message, value);
       },
     );
@@ -203,7 +188,6 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
-    //_assertAuthValid();
     return await _client.mutation(name: name, args: args);
   }
 
@@ -217,7 +201,6 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
-    //_assertAuthValid();
     return await _client.action(name: name, args: args);
   }
 
@@ -227,7 +210,6 @@ class ConvexClient {
   ///
   /// Used to authenticate requests to the Convex backend
   Future<void> setAuth({required String? token}) async {
-    _updateAuthToken(token);
     return await _client.setAuth(token: token);
   }
 
@@ -262,89 +244,4 @@ class ConvexClient {
   void setAuthErrorHandler(AuthErrorCallback callback) {
     _client.setAuthErrorHandler(callback);
   }
-
-  void _updateAuthToken(String? token) {
-    _authExpiryTimer?.cancel();
-    _authExpiryTimer = null;
-    _authTokenExpiresAt = null;
-    _authExpiredNotified = false;
-
-    if (token == null) {
-      return;
-    }
-
-    final expiresAt = _parseJwtExpiration(token);
-    if (expiresAt == null) {
-      return;
-    }
-
-    _authTokenExpiresAt = expiresAt;
-    final delay = expiresAt.difference(DateTime.now().toUtc());
-    if (delay <= Duration.zero) {
-      _emitAuthExpired(expiresAt);
-      return;
-    }
-    _authExpiryTimer = Timer(delay, () {
-      _emitAuthExpired(expiresAt);
-    });
-  }
-
-  void _assertAuthValid() {
-    final expiresAt = _authTokenExpiresAt;
-    if (expiresAt == null) {
-      return;
-    }
-    if (DateTime.now().toUtc().isAfter(expiresAt)) {
-      _emitAuthExpired(expiresAt);
-      throw AuthExpiredException(expiresAt);
-    }
-  }
-
-  void _emitAuthExpired(DateTime expiresAt) {
-    if (_authExpiredNotified) {
-      return;
-    }
-    _authExpiredNotified = true;
-    _authExpiredController.addError(AuthExpiredException(expiresAt));
-  }
-
-  DateTime? _parseJwtExpiration(String token) {
-    try {
-      final parts = token.split('.');
-      if (parts.length < 2) {
-        return null;
-      }
-      final payload = base64Url.normalize(parts[1]);
-      final decoded = utf8.decode(base64Url.decode(payload));
-      final data = jsonDecode(decoded);
-      if (data is! Map<String, dynamic>) {
-        return null;
-      }
-      final exp = data['exp'];
-      final expSeconds = exp is int
-          ? exp
-          : exp is num
-          ? exp.toInt()
-          : int.tryParse(exp?.toString() ?? '');
-      if (expSeconds == null) {
-        return null;
-      }
-      return DateTime.fromMillisecondsSinceEpoch(
-        expSeconds * 1000,
-        isUtc: true,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-}
-
-/// Thrown when the current auth token has expired.
-class AuthExpiredException implements Exception {
-  final DateTime expiredAt;
-
-  AuthExpiredException(this.expiredAt);
-
-  @override
-  String toString() => 'AuthExpiredException: token expired at $expiredAt';
 }

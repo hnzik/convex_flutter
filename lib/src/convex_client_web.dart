@@ -4,6 +4,12 @@ import 'dart:js_interop';
 
 import 'convex_client_interface.dart';
 import 'subscription_handle.dart';
+import 'rust/lib.dart'
+    show
+        AuthError,
+        AuthErrorAction_RefreshToken,
+        AuthErrorAction_ClearAuth,
+        AuthErrorAction_Disconnect;
 
 /// JS interop bindings for the Convex browser client.
 ///
@@ -50,6 +56,7 @@ external String? _jsonStringify(JSAny? value);
 class WebConvexClient implements ConvexClientInterface {
   final JSConvexClient _client;
   String? _currentToken;
+  AuthErrorCallback? _authErrorCallback;
 
   WebConvexClient._(this._client);
 
@@ -210,23 +217,58 @@ class WebConvexClient implements ConvexClientInterface {
   @override
   Future<void> setAuth({required String? token}) async {
     if (token == null) {
+      _client.clearAuth();
+      _currentToken = null;
       return;
     }
     _currentToken = token;
 
-    JSAny? tokenFetcher(JSAny? forceRefresh) {
+    // Token fetcher - convex-js calls this to get the token
+    // Can return string directly or a Promise<string>
+    JSAny tokenFetcher(JSAny? forceRefreshJs) {
+      return _fetchTokenAsJSPromise().toJS;
+    }
+
+    // onChange is called when auth status changes
+    void onChange(JSAny? isAuthenticatedJs) {
+      // Could log or handle state changes here if needed
+    }
+
+    _client.setAuth(tokenFetcher.toJS, onChange.toJS);
+  }
+
+  /// Fetch token via callback, returning a Future for proper JS Promise conversion.
+  Future<JSAny?> _fetchTokenAsJSPromise() async {
+    final callback = _authErrorCallback;
+    if (callback == null) {
       return _currentToken?.toJS;
     }
 
-    _client.setAuth(tokenFetcher.toJS, null);
+    final error = AuthError(
+      errorMessage: 'Token refresh requested',
+      baseVersion: null,
+    );
+
+    final action = await callback(error);
+
+    switch (action) {
+      case AuthErrorAction_RefreshToken(:final token):
+        _currentToken = token;
+        return token.toJS;
+      case AuthErrorAction_ClearAuth():
+        _currentToken = null;
+        _client.clearAuth();
+        return null;
+      case AuthErrorAction_Disconnect():
+        _currentToken = null;
+        _client.clearAuth();
+        return null;
+    }
   }
 
   @override
   void setAuthErrorHandler(AuthErrorCallback callback) {
-    // Web implementation uses the JS client's built-in auth handling.
-    // The Convex JS client handles auth errors internally through the
-    // tokenFetcher callback. For now, this is a no-op on web.
-    // TODO: Implement proper auth error handling for web if needed.
+    _authErrorCallback = callback;
   }
 
   /// Convert an error to a Dart exception.
