@@ -9,7 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 flutter_rust_bridge = "=2.11.1"
 tokio = { version = "1", features = ["full"] }
-convex = { version = "0.10.2", default-features = false, features = ["rustls-tls-webpki-roots"] }
+convex = {git = "https://github.com/hnzik/convex-rs.git", branch = "main", default-features = false, features = ["rustls-tls-webpki-roots"] }
 anyhow = { version = "1.0.86" }
 thiserror = { version = "1.0.61" }
 tokio-stream = { features = [ "io-util", "sync" ], version = "0.1" }
@@ -18,7 +18,6 @@ futures = { version = "0.3" }
 parking_lot = { version = "0.12.3" }
 async-once-cell = { version = "0.5.3" }
 serde_json = { version = "1.0.120" }
-base64 = { version = "0.22" }
 rustls = { version = "0.23.35", default-features = false, features = ["ring"] }
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

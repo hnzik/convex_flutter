@@ -221,6 +221,14 @@ class WebConvexClient implements ConvexClientInterface {
     _client.setAuth(tokenFetcher.toJS, null);
   }
 
+  @override
+  void setAuthErrorHandler(AuthErrorCallback callback) {
+    // Web implementation uses the JS client's built-in auth handling.
+    // The Convex JS client handles auth errors internally through the
+    // tokenFetcher callback. For now, this is a no-op on web.
+    // TODO: Implement proper auth error handling for web if needed.
+  }
+
   /// Convert an error to a Dart exception.
   Exception _convertError(Object error) {
     return Exception(error.toString());

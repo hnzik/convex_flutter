@@ -9,7 +9,14 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'lib.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `connected_client`, `handle_direct_function_result`, `internal_action`, `internal_mutation`, `internal_set_auth`, `internal_subscribe`, `new`, `parse_json_args`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<AuthErrorStreamReceiver>>
+abstract class AuthErrorStreamReceiver implements RustOpaqueInterface {
+  /// Receives the next auth error from the stream.
+  /// Returns None if the stream is closed.
+  Future<AuthError?> recv();
+}
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CallbackSubscriber>>
 abstract class CallbackSubscriber
@@ -60,6 +67,15 @@ abstract class MobileConvexClient implements RustOpaqueInterface {
     required Map<String, String> args,
   });
 
+  /// Registers an auth error callback. Returns a stream receiver for auth errors.
+  /// When an auth error occurs, it will be sent through this stream.
+  /// Dart should call `respond_to_auth_error` with the appropriate action.
+  Future<AuthErrorStreamReceiver> registerAuthErrorHandler();
+
+  /// Responds to an auth error with the specified action.
+  /// This should be called after receiving an auth error through the stream.
+  void respondToAuthError({required AuthErrorAction action});
+
   /// Sets authentication token for the client.
   Future<void> setAuth({String? token});
 
@@ -82,6 +98,44 @@ abstract class QuerySubscriber {
   Future<void> onError({required String message, String? value});
 
   Future<void> onUpdate({required String value});
+}
+
+/// Authentication error information from the Convex backend.
+/// Exposed to Dart when an authentication error occurs.
+class AuthError {
+  /// The error message describing why authentication failed.
+  final String errorMessage;
+
+  /// The base version of the identity that was rejected, if available.
+  final int? baseVersion;
+
+  const AuthError({required this.errorMessage, this.baseVersion});
+
+  @override
+  int get hashCode => errorMessage.hashCode ^ baseVersion.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AuthError &&
+          runtimeType == other.runtimeType &&
+          errorMessage == other.errorMessage &&
+          baseVersion == other.baseVersion;
+}
+
+@freezed
+sealed class AuthErrorAction with _$AuthErrorAction {
+  const AuthErrorAction._();
+
+  /// Refresh authentication with a new token.
+  const factory AuthErrorAction.refreshToken({required String token}) =
+      AuthErrorAction_RefreshToken;
+
+  /// Clear authentication and continue as unauthenticated.
+  const factory AuthErrorAction.clearAuth() = AuthErrorAction_ClearAuth;
+
+  /// Disconnect the client entirely.
+  const factory AuthErrorAction.disconnect() = AuthErrorAction_Disconnect;
 }
 
 @freezed

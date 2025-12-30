@@ -210,8 +210,7 @@ dependencies = [
 [[package]]
 name = "convex"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16e7ab85cfc76e9a13d252da8a7933ab52f38b9c51de3f7bb8dbe4e2262bac04"
+source = "git+https://github.com/hnzik/convex-rs.git?branch=main#8fdc744567b527a867cce3298ccde93216d07509"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -237,7 +236,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
- "base64 0.22.1",
  "convex",
  "flutter_rust_bridge",
  "futures",
@@ -254,8 +252,7 @@ dependencies = [
 [[package]]
 name = "convex_sync_types"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f819ce8fd4370f235f2f5e345499fa219d7d1827cd88923f1fa42942853604a0"
+source = "git+https://github.com/hnzik/convex-rs.git?branch=main#8fdc744567b527a867cce3298ccde93216d07509"
 dependencies = [
  "anyhow",
  "base64 0.13.1",

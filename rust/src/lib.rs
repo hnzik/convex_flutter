@@ -2,12 +2,13 @@ mod frb_generated;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use once_cell::sync::OnceCell;
 use convex::{
+    AuthError as ConvexAuthError,
+    AuthErrorAction as ConvexAuthErrorAction,
     ConvexClient,
     ConvexClientBuilder,
     FunctionResult,
@@ -20,6 +21,7 @@ use futures::{
 };
 use parking_lot::Mutex;
 use rustls::crypto::ring;
+use tokio::sync::mpsc;
 
 // Custom error type for Convex client operations, exposed to Dart.
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +42,49 @@ impl From<anyhow::Error> for ClientError {
     fn from(value: anyhow::Error) -> Self {
         Self::InternalError {
             msg: value.to_string(),
+        }
+    }
+}
+
+/// Authentication error information from the Convex backend.
+/// Exposed to Dart when an authentication error occurs.
+#[derive(Debug, Clone)]
+#[frb]
+pub struct AuthError {
+    /// The error message describing why authentication failed.
+    pub error_message: String,
+    /// The base version of the identity that was rejected, if available.
+    pub base_version: Option<u32>,
+}
+
+impl From<&ConvexAuthError> for AuthError {
+    fn from(error: &ConvexAuthError) -> Self {
+        AuthError {
+            error_message: error.error_message.clone(),
+            base_version: error.base_version.map(|v| v as u32),
+        }
+    }
+}
+
+/// Action to take in response to an authentication error.
+/// Returned by the auth error callback to tell the client how to proceed.
+#[derive(Debug, Clone)]
+#[frb]
+pub enum AuthErrorAction {
+    /// Refresh authentication with a new token.
+    RefreshToken { token: String },
+    /// Clear authentication and continue as unauthenticated.
+    ClearAuth,
+    /// Disconnect the client entirely.
+    Disconnect,
+}
+
+impl From<AuthErrorAction> for ConvexAuthErrorAction {
+    fn from(action: AuthErrorAction) -> Self {
+        match action {
+            AuthErrorAction::RefreshToken { token } => ConvexAuthErrorAction::RefreshToken(token),
+            AuthErrorAction::ClearAuth => ConvexAuthErrorAction::ClearAuth,
+            AuthErrorAction::Disconnect => ConvexAuthErrorAction::Disconnect,
         }
     }
 }
@@ -111,6 +156,28 @@ impl QuerySubscriber for CallbackSubscriberDartFn {
     }
 }
 
+/// Type alias for the auth error callback sender (sends errors to Dart)
+type AuthErrorSender = mpsc::UnboundedSender<AuthError>;
+/// Type alias for the auth error action receiver (receives actions from Dart)
+type AuthActionReceiver = std::sync::mpsc::Receiver<AuthErrorAction>;
+/// Type alias for the auth error action sender (Dart sends actions through this)
+type AuthActionSender = std::sync::mpsc::Sender<AuthErrorAction>;
+
+/// Stream receiver for auth errors. Dart can poll this to receive auth errors.
+#[frb(opaque)]
+pub struct AuthErrorStreamReceiver {
+    receiver: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AuthError>>>,
+}
+
+impl AuthErrorStreamReceiver {
+    /// Receives the next auth error from the stream.
+    /// Returns None if the stream is closed.
+    #[frb]
+    pub async fn recv(&self) -> Option<AuthError> {
+        self.receiver.lock().await.recv().await
+    }
+}
+
 /// Main Convex client struct, opaque to Dart, managing connections and operations.
 #[frb(opaque)]
 pub struct MobileConvexClient {
@@ -118,7 +185,12 @@ pub struct MobileConvexClient {
     client_id: String,              // Client ID for authentication
     client: OnceCell<Arc<tokio::sync::Mutex<ConvexClient>>>, // Lazy-initialized Convex client
     rt: tokio::runtime::Runtime,    // Tokio runtime for async operations
-    auth_expires_at: Arc<Mutex<Option<u64>>>, // Auth token expiration timestamp (Unix seconds)
+    // Channel for sending auth errors to Dart
+    auth_error_sender: Arc<Mutex<Option<AuthErrorSender>>>,
+    // Channel for receiving auth error responses from Dart
+    auth_action_receiver: Arc<Mutex<Option<AuthActionReceiver>>>,
+    // Sender that Dart uses to respond to auth errors
+    auth_action_sender: Arc<Mutex<Option<AuthActionSender>>>,
 }
 
 impl MobileConvexClient {
@@ -136,58 +208,35 @@ impl MobileConvexClient {
             client_id,
             client: OnceCell::new(),
             rt,
-            auth_expires_at: Arc::new(Mutex::new(None)),
+            auth_error_sender: Arc::new(Mutex::new(None)),
+            auth_action_receiver: Arc::new(Mutex::new(None)),
+            auth_action_sender: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Parses a JWT token and extracts the expiration timestamp.
-    fn parse_jwt_expiration(token: &str) -> Option<u64> {
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() < 2 {
-            return None;
-        }
+    /// Registers an auth error callback. Returns a stream receiver for auth errors.
+    /// When an auth error occurs, it will be sent through this stream.
+    /// Dart should call `respond_to_auth_error` with the appropriate action.
+    #[frb]
+    pub fn register_auth_error_handler(&self) -> AuthErrorStreamReceiver {
+        // Create channels for bidirectional communication
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<AuthError>();
+        let (action_tx, action_rx) = std::sync::mpsc::channel::<AuthErrorAction>();
 
-        // Decode the payload (second part)
-        let payload = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
-        let payload_str = String::from_utf8(payload).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&payload_str).ok()?;
+        // Store the sender and receiver
+        *self.auth_error_sender.lock() = Some(error_tx);
+        *self.auth_action_receiver.lock() = Some(action_rx);
+        *self.auth_action_sender.lock() = Some(action_tx);
 
-        // Extract exp claim
-        json.get("exp")?.as_u64()
+        AuthErrorStreamReceiver { receiver: Arc::new(tokio::sync::Mutex::new(error_rx)) }
     }
 
-    /// Checks if the current auth token is still valid.
-    /// Returns Ok(()) if valid or no token is set, Err if expired.
-    /// If expired, also clears the auth token from the underlying client to stop retry loops.
-    fn assert_auth_valid(&self) -> Result<(), ClientError> {
-        let expires_at = *self.auth_expires_at.lock();
-        if let Some(exp) = expires_at {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            if now >= exp {
-                // Clear our tracked expiration
-                *self.auth_expires_at.lock() = None;
-                // Clear the auth token in the underlying client to stop the retry loop
-                self.clear_expired_auth();
-                return Err(ClientError::InternalError {
-                    msg: format!("Auth token expired at {}", exp),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    /// Clears the auth token from the underlying client.
-    /// Called when token expiration is detected to stop the reconnect retry loop.
-    fn clear_expired_auth(&self) {
-        if let Some(client) = self.client.get() {
-            let client = client.clone();
-            self.rt.spawn(async move {
-                let mut client_guard = client.lock().await;
-                client_guard.set_auth(None).await;
-            });
+    /// Responds to an auth error with the specified action.
+    /// This should be called after receiving an auth error through the stream.
+    #[frb(sync)]
+    pub fn respond_to_auth_error(&self, action: AuthErrorAction) {
+        if let Some(sender) = self.auth_action_sender.lock().as_ref() {
+            let _ = sender.send(action);
         }
     }
 
@@ -199,13 +248,39 @@ impl MobileConvexClient {
                 let url = self.deployment_url.clone();
                 let client_id = self.client_id.clone();
                 let rt_handle = self.rt.handle().clone();
+                let error_sender = self.auth_error_sender.clone();
+                let action_receiver = self.auth_action_receiver.clone();
 
                 // Use block_in_place to allow blocking from async context,
                 // then run on our dedicated runtime
                 tokio::task::block_in_place(|| {
                     rt_handle.block_on(async move {
+                        // Create the auth error callback
+                        let auth_callback: Arc<dyn Fn(&ConvexAuthError) -> ConvexAuthErrorAction + Send + Sync> =
+                            Arc::new(move |error: &ConvexAuthError| {
+                                // Try to send the error to Dart
+                                if let Some(sender) = error_sender.lock().as_ref() {
+                                    let dart_error = AuthError::from(error);
+                                    let _ = sender.send(dart_error);
+
+                                    // Wait for response from Dart with a timeout
+                                    if let Some(receiver) = action_receiver.lock().as_ref() {
+                                        match receiver.recv_timeout(Duration::from_secs(30)) {
+                                            Ok(action) => return action.into(),
+                                            Err(_) => {
+                                                // Timeout or channel closed - default to ClearAuth
+                                                return ConvexAuthErrorAction::ClearAuth;
+                                            }
+                                        }
+                                    }
+                                }
+                                // No handler registered - default to ClearAuth
+                                ConvexAuthErrorAction::ClearAuth
+                            });
+
                         let client = ConvexClientBuilder::new(url.as_str())
                             .with_client_id(&client_id)
+                            .with_on_auth_error(auth_callback)
                             .build()
                             .await?;
 
@@ -226,7 +301,6 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> Result<String, ClientError> {
-        self.assert_auth_valid()?;
         let client = self.connected_client()?;
         let result = self.rt
             .spawn(async move {
@@ -247,7 +321,6 @@ impl MobileConvexClient {
         on_update: impl Fn(String) -> DartFnFuture<()> + Send + Sync + 'static,
         on_error: impl Fn(String, Option<String>) -> DartFnFuture<()> + Send + Sync + 'static,
     ) -> Result<SubscriptionHandle, ClientError> {
-        self.assert_auth_valid()?;
         let subscriber = Arc::new(CallbackSubscriberDartFn {
             on_update: Box::new(on_update),
             on_error: Box::new(on_error),
@@ -267,8 +340,6 @@ impl MobileConvexClient {
         let (cancel_sender, cancel_receiver) = oneshot::channel::<()>();
         let sub_name = name;
         let parsed_args = parse_json_args(args);
-        let auth_expires_at = self.auth_expires_at.clone();
-        let client_for_auth_clear = client.clone();
 
         // Spawn EVERYTHING on self.rt - subscription creation AND the loop
         self.rt.spawn(async move {
@@ -288,54 +359,10 @@ impl MobileConvexClient {
             let cancel_fut = cancel_receiver.fuse();
             pin_mut!(cancel_fut);
 
-            // Helper closure to check auth and clear if expired
-            let check_auth_expired = || -> bool {
-                if let Some(exp) = *auth_expires_at.lock() {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    if now >= exp {
-                        // Clear the expiration tracker
-                        *auth_expires_at.lock() = None;
-                        return true;
-                    }
-                }
-                false
-            };
-
             loop {
-                // Check if auth token has expired before waiting for next value
-                if check_auth_expired() {
-                    // Clear auth from underlying client to stop retry loop
-                    {
-                        let mut client_guard = client_for_auth_clear.lock().await;
-                        client_guard.set_auth(None).await;
-                    }
-                    subscriber.on_error(
-                        "AUTH_EXPIRED".to_string(),
-                        None,
-                    );
-                    break;
-                }
-
                 select_biased! {
                     new_val = subscription.next().fuse() => {
                         let new_val = new_val.expect("Client dropped prematurely");
-
-                        // Check auth validity again after receiving a value
-                        if check_auth_expired() {
-                            // Clear auth from underlying client to stop retry loop
-                            {
-                                let mut client_guard = client_for_auth_clear.lock().await;
-                                client_guard.set_auth(None).await;
-                            }
-                            subscriber.on_error(
-                                "AUTH_EXPIRED".to_string(),
-                                None,
-                            );
-                            break;
-                        }
 
                         match new_val {
                             FunctionResult::Value(value) => {
@@ -373,7 +400,6 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> Result<String, ClientError> {
-        self.assert_auth_valid()?;
         let result = self.internal_mutation(name, args).await?;
         handle_direct_function_result(result)
     }
@@ -401,7 +427,6 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> Result<String, ClientError> {
-        self.assert_auth_valid()?;
         let result = self.internal_action(name, args).await?;
         handle_direct_function_result(result)
     }
@@ -425,10 +450,6 @@ impl MobileConvexClient {
     /// Sets authentication token for the client.
     #[frb]
     pub async fn set_auth(&self, token: Option<String>) -> Result<(), ClientError> {
-        // Parse and store the expiration time
-        let expires_at = token.as_ref().and_then(|t| Self::parse_jwt_expiration(t));
-        *self.auth_expires_at.lock() = expires_at;
-
         Ok(self.internal_set_auth(token).await?)
     }
 

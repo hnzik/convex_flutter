@@ -16,6 +16,8 @@ import 'rust/frb_generated.dart';
 /// the Convex backend via the Rust convex crate.
 class NativeConvexClient implements ConvexClientInterface {
   final rust.MobileConvexClient _client;
+  rust.AuthErrorStreamReceiver? _authErrorReceiver;
+  bool _authErrorListenerRunning = false;
 
   NativeConvexClient._(this._client);
 
@@ -91,6 +93,38 @@ class NativeConvexClient implements ConvexClientInterface {
   @override
   Future<void> setAuth({required String? token}) async {
     return await _client.setAuth(token: token);
+  }
+
+  @override
+  void setAuthErrorHandler(AuthErrorCallback callback) {
+    if (_authErrorListenerRunning) {
+      return; // Already listening
+    }
+    _authErrorListenerRunning = true;
+
+    // Start listening for auth errors in the background
+    _startAuthErrorListener(callback);
+  }
+
+  Future<void> _startAuthErrorListener(AuthErrorCallback callback) async {
+    // Register the handler and get the stream receiver
+    _authErrorReceiver ??= await _client.registerAuthErrorHandler();
+
+    // Listen for auth errors in a loop
+    while (_authErrorListenerRunning) {
+      final error = await _authErrorReceiver!.recv();
+      if (error == null) {
+        // Stream closed
+        _authErrorListenerRunning = false;
+        break;
+      }
+
+      // Call the user's callback to get the action
+      final action = await callback(error);
+
+      // Send the action back to Rust
+      _client.respondToAuthError(action: action);
+    }
   }
 
   /// Convert a ClientError to a Dart exception.

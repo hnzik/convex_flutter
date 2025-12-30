@@ -3,11 +3,15 @@ import 'dart:convert';
 
 import 'convex_client_interface.dart';
 import 'subscription_handle.dart';
+import 'rust/lib.dart' show AuthError, AuthErrorAction;
 
 // Conditional imports for platform-specific implementations
 import 'convex_client_stub.dart'
     if (dart.library.io) 'convex_client_native.dart'
     if (dart.library.js_interop) 'convex_client_web.dart';
+
+// Re-export auth error types for convenience
+export 'rust/lib.dart' show AuthError, AuthErrorAction;
 
 /// A client for interacting with a Convex backend service.
 ///
@@ -154,7 +158,7 @@ class ConvexClient {
   ///
   /// Returns the query result as a JSON string
   Future<String> query(String name, Map<String, dynamic> args) async {
-    _assertAuthValid();
+    //_assertAuthValid();
     return await _client.query(name, args);
   }
 
@@ -172,7 +176,7 @@ class ConvexClient {
     required void Function(String) onUpdate,
     required void Function(String, String?) onError,
   }) async {
-    _assertAuthValid();
+    //_assertAuthValid();
     return await _client.subscribe(
       name: name,
       args: args,
@@ -199,7 +203,7 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
-    _assertAuthValid();
+    //_assertAuthValid();
     return await _client.mutation(name: name, args: args);
   }
 
@@ -213,7 +217,7 @@ class ConvexClient {
     required String name,
     required Map<String, dynamic> args,
   }) async {
-    _assertAuthValid();
+    //_assertAuthValid();
     return await _client.action(name: name, args: args);
   }
 
@@ -225,6 +229,38 @@ class ConvexClient {
   Future<void> setAuth({required String? token}) async {
     _updateAuthToken(token);
     return await _client.setAuth(token: token);
+  }
+
+  /// Sets a callback to handle authentication errors from the Convex backend.
+  ///
+  /// When the backend rejects an auth token (e.g., expired or invalid token),
+  /// the [callback] will be invoked with the [AuthError] details. The callback
+  /// should return an [AuthErrorAction] to specify how to proceed:
+  ///
+  /// - [AuthErrorAction.refreshToken]: Provide a new token to retry authentication
+  /// - [AuthErrorAction.clearAuth]: Clear authentication and continue anonymously
+  /// - [AuthErrorAction.disconnect]: Disconnect the client entirely
+  ///
+  /// Example:
+  /// ```dart
+  /// client.setAuthErrorHandler((error) async {
+  ///   print('Auth error: ${error.errorMessage}');
+  ///
+  ///   // Try to refresh the token
+  ///   final newToken = await myAuthProvider.refreshToken();
+  ///   if (newToken != null) {
+  ///     return AuthErrorAction.refreshToken(token: newToken);
+  ///   }
+  ///
+  ///   // If refresh fails, clear auth and continue anonymously
+  ///   return AuthErrorAction.clearAuth();
+  /// });
+  /// ```
+  ///
+  /// Note: The callback should respond within 30 seconds, otherwise the client
+  /// will default to [AuthErrorAction.clearAuth].
+  void setAuthErrorHandler(AuthErrorCallback callback) {
+    _client.setAuthErrorHandler(callback);
   }
 
   void _updateAuthToken(String? token) {

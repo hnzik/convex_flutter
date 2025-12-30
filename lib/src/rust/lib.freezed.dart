@@ -12,6 +12,302 @@ part of 'lib.dart';
 // dart format off
 T _$identity<T>(T value) => value;
 /// @nodoc
+mixin _$AuthErrorAction {
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthErrorAction);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+  return 'AuthErrorAction()';
+}
+
+
+}
+
+/// @nodoc
+class $AuthErrorActionCopyWith<$Res>  {
+$AuthErrorActionCopyWith(AuthErrorAction _, $Res Function(AuthErrorAction) __);
+}
+
+
+/// Adds pattern-matching-related methods to [AuthErrorAction].
+extension AuthErrorActionPatterns on AuthErrorAction {
+/// A variant of `map` that fallback to returning `orElse`.
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case final Subclass value:
+///     return ...;
+///   case _:
+///     return orElse();
+/// }
+/// ```
+
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AuthErrorAction_RefreshToken value)?  refreshToken,TResult Function( AuthErrorAction_ClearAuth value)?  clearAuth,TResult Function( AuthErrorAction_Disconnect value)?  disconnect,required TResult orElse(),}){
+final _that = this;
+switch (_that) {
+case AuthErrorAction_RefreshToken() when refreshToken != null:
+return refreshToken(_that);case AuthErrorAction_ClearAuth() when clearAuth != null:
+return clearAuth(_that);case AuthErrorAction_Disconnect() when disconnect != null:
+return disconnect(_that);case _:
+  return orElse();
+
+}
+}
+/// A `switch`-like method, using callbacks.
+///
+/// Callbacks receives the raw object, upcasted.
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case final Subclass value:
+///     return ...;
+///   case final Subclass2 value:
+///     return ...;
+/// }
+/// ```
+
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AuthErrorAction_RefreshToken value)  refreshToken,required TResult Function( AuthErrorAction_ClearAuth value)  clearAuth,required TResult Function( AuthErrorAction_Disconnect value)  disconnect,}){
+final _that = this;
+switch (_that) {
+case AuthErrorAction_RefreshToken():
+return refreshToken(_that);case AuthErrorAction_ClearAuth():
+return clearAuth(_that);case AuthErrorAction_Disconnect():
+return disconnect(_that);}
+}
+/// A variant of `map` that fallback to returning `null`.
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case final Subclass value:
+///     return ...;
+///   case _:
+///     return null;
+/// }
+/// ```
+
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AuthErrorAction_RefreshToken value)?  refreshToken,TResult? Function( AuthErrorAction_ClearAuth value)?  clearAuth,TResult? Function( AuthErrorAction_Disconnect value)?  disconnect,}){
+final _that = this;
+switch (_that) {
+case AuthErrorAction_RefreshToken() when refreshToken != null:
+return refreshToken(_that);case AuthErrorAction_ClearAuth() when clearAuth != null:
+return clearAuth(_that);case AuthErrorAction_Disconnect() when disconnect != null:
+return disconnect(_that);case _:
+  return null;
+
+}
+}
+/// A variant of `when` that fallback to an `orElse` callback.
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case Subclass(:final field):
+///     return ...;
+///   case _:
+///     return orElse();
+/// }
+/// ```
+
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String token)?  refreshToken,TResult Function()?  clearAuth,TResult Function()?  disconnect,required TResult orElse(),}) {final _that = this;
+switch (_that) {
+case AuthErrorAction_RefreshToken() when refreshToken != null:
+return refreshToken(_that.token);case AuthErrorAction_ClearAuth() when clearAuth != null:
+return clearAuth();case AuthErrorAction_Disconnect() when disconnect != null:
+return disconnect();case _:
+  return orElse();
+
+}
+}
+/// A `switch`-like method, using callbacks.
+///
+/// As opposed to `map`, this offers destructuring.
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case Subclass(:final field):
+///     return ...;
+///   case Subclass2(:final field2):
+///     return ...;
+/// }
+/// ```
+
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String token)  refreshToken,required TResult Function()  clearAuth,required TResult Function()  disconnect,}) {final _that = this;
+switch (_that) {
+case AuthErrorAction_RefreshToken():
+return refreshToken(_that.token);case AuthErrorAction_ClearAuth():
+return clearAuth();case AuthErrorAction_Disconnect():
+return disconnect();}
+}
+/// A variant of `when` that fallback to returning `null`
+///
+/// It is equivalent to doing:
+/// ```dart
+/// switch (sealedClass) {
+///   case Subclass(:final field):
+///     return ...;
+///   case _:
+///     return null;
+/// }
+/// ```
+
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String token)?  refreshToken,TResult? Function()?  clearAuth,TResult? Function()?  disconnect,}) {final _that = this;
+switch (_that) {
+case AuthErrorAction_RefreshToken() when refreshToken != null:
+return refreshToken(_that.token);case AuthErrorAction_ClearAuth() when clearAuth != null:
+return clearAuth();case AuthErrorAction_Disconnect() when disconnect != null:
+return disconnect();case _:
+  return null;
+
+}
+}
+
+}
+
+/// @nodoc
+
+
+class AuthErrorAction_RefreshToken extends AuthErrorAction {
+  const AuthErrorAction_RefreshToken({required this.token}): super._();
+  
+
+ final  String token;
+
+/// Create a copy of AuthErrorAction
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AuthErrorAction_RefreshTokenCopyWith<AuthErrorAction_RefreshToken> get copyWith => _$AuthErrorAction_RefreshTokenCopyWithImpl<AuthErrorAction_RefreshToken>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthErrorAction_RefreshToken&&(identical(other.token, token) || other.token == token));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,token);
+
+@override
+String toString() {
+  return 'AuthErrorAction.refreshToken(token: $token)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AuthErrorAction_RefreshTokenCopyWith<$Res> implements $AuthErrorActionCopyWith<$Res> {
+  factory $AuthErrorAction_RefreshTokenCopyWith(AuthErrorAction_RefreshToken value, $Res Function(AuthErrorAction_RefreshToken) _then) = _$AuthErrorAction_RefreshTokenCopyWithImpl;
+@useResult
+$Res call({
+ String token
+});
+
+
+
+
+}
+/// @nodoc
+class _$AuthErrorAction_RefreshTokenCopyWithImpl<$Res>
+    implements $AuthErrorAction_RefreshTokenCopyWith<$Res> {
+  _$AuthErrorAction_RefreshTokenCopyWithImpl(this._self, this._then);
+
+  final AuthErrorAction_RefreshToken _self;
+  final $Res Function(AuthErrorAction_RefreshToken) _then;
+
+/// Create a copy of AuthErrorAction
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? token = null,}) {
+  return _then(AuthErrorAction_RefreshToken(
+token: null == token ? _self.token : token // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class AuthErrorAction_ClearAuth extends AuthErrorAction {
+  const AuthErrorAction_ClearAuth(): super._();
+  
+
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthErrorAction_ClearAuth);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+  return 'AuthErrorAction.clearAuth()';
+}
+
+
+}
+
+
+
+
+/// @nodoc
+
+
+class AuthErrorAction_Disconnect extends AuthErrorAction {
+  const AuthErrorAction_Disconnect(): super._();
+  
+
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthErrorAction_Disconnect);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+  return 'AuthErrorAction.disconnect()';
+}
+
+
+}
+
+
+
+
+/// @nodoc
 mixin _$ClientError {
 
 
