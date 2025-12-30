@@ -2,10 +2,10 @@ mod frb_generated;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use android_logger::Config;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use once_cell::sync::OnceCell;
 use convex::{
     ConvexClient,
@@ -18,11 +18,8 @@ use futures::{
     channel::oneshot::{self, Sender},
     pin_mut, select_biased, FutureExt, StreamExt,
 };
-use log::{debug, LevelFilter};
 use parking_lot::Mutex;
 use rustls::crypto::ring;
-#[cfg(target_os = "android")]
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // Custom error type for Convex client operations, exposed to Dart.
 #[derive(Debug, thiserror::Error)]
@@ -121,36 +118,14 @@ pub struct MobileConvexClient {
     client_id: String,              // Client ID for authentication
     client: OnceCell<Arc<tokio::sync::Mutex<ConvexClient>>>, // Lazy-initialized Convex client
     rt: tokio::runtime::Runtime,    // Tokio runtime for async operations
+    auth_expires_at: Arc<Mutex<Option<u64>>>, // Auth token expiration timestamp (Unix seconds)
 }
 
 impl MobileConvexClient {
     /// Creates a new MobileConvexClient instance with the given deployment URL and client ID.
     #[frb(sync)]
     pub fn new(deployment_url: String, client_id: String) -> MobileConvexClient {
-        // Initialize logger for Android (works in both debug and release)
-        android_logger::init_once(Config::default().with_max_level(LevelFilter::Debug));
-
         let _ = ring::default_provider().install_default();
-
-        // Initialize tracing for convex crate debug output
-        #[cfg(target_os = "android")]
-        {
-            // On Android, output to logcat via tracing-android
-            let _ = tracing_subscriber::registry()
-                .with(tracing_android::layer("convex_flutter").unwrap())
-                .with(tracing_subscriber::filter::LevelFilter::DEBUG)
-                .try_init();
-        }
-
-        #[cfg(not(target_os = "android"))]
-        {
-            // On other platforms, use default subscriber
-            let _ = tracing_subscriber::fmt()
-                .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
-                .try_init();
-        }
-
-        log::error!("[CONVEX] Tracing initialized");
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -161,6 +136,58 @@ impl MobileConvexClient {
             client_id,
             client: OnceCell::new(),
             rt,
+            auth_expires_at: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Parses a JWT token and extracts the expiration timestamp.
+    fn parse_jwt_expiration(token: &str) -> Option<u64> {
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        // Decode the payload (second part)
+        let payload = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
+        let payload_str = String::from_utf8(payload).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&payload_str).ok()?;
+
+        // Extract exp claim
+        json.get("exp")?.as_u64()
+    }
+
+    /// Checks if the current auth token is still valid.
+    /// Returns Ok(()) if valid or no token is set, Err if expired.
+    /// If expired, also clears the auth token from the underlying client to stop retry loops.
+    fn assert_auth_valid(&self) -> Result<(), ClientError> {
+        let expires_at = *self.auth_expires_at.lock();
+        if let Some(exp) = expires_at {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now >= exp {
+                // Clear our tracked expiration
+                *self.auth_expires_at.lock() = None;
+                // Clear the auth token in the underlying client to stop the retry loop
+                self.clear_expired_auth();
+                return Err(ClientError::InternalError {
+                    msg: format!("Auth token expired at {}", exp),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears the auth token from the underlying client.
+    /// Called when token expiration is detected to stop the reconnect retry loop.
+    fn clear_expired_auth(&self) {
+        if let Some(client) = self.client.get() {
+            let client = client.clone();
+            self.rt.spawn(async move {
+                let mut client_guard = client.lock().await;
+                client_guard.set_auth(None).await;
+            });
         }
     }
 
@@ -177,17 +204,13 @@ impl MobileConvexClient {
                 // then run on our dedicated runtime
                 tokio::task::block_in_place(|| {
                     rt_handle.block_on(async move {
-                        log::error!("[CONVEX] Building ConvexClient...");
                         let client = ConvexClientBuilder::new(url.as_str())
                             .with_client_id(&client_id)
                             .build()
                             .await?;
-                        log::error!("[CONVEX] ConvexClient built");
 
                         // Give the WebSocket a moment to establish connection
-                        log::error!("[CONVEX] Waiting for WebSocket to establish...");
                         tokio::time::sleep(Duration::from_millis(1000)).await;
-                        log::error!("[CONVEX] Client ready");
 
                         Ok::<_, anyhow::Error>(Arc::new(tokio::sync::Mutex::new(client)))
                     })
@@ -203,18 +226,15 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> Result<String, ClientError> {
-        log::error!("[CONVEX] query() called for: {}", name);
+        self.assert_auth_valid()?;
         let client = self.connected_client()?;
-        log::error!("[CONVEX] query() got client for: {}", name);
-        let name_clone = name.clone();
         let result = self.rt
             .spawn(async move {
                 let mut client = client.lock().await;
-                client.query(name_clone.as_str(), parse_json_args(args)).await
+                client.query(name.as_str(), parse_json_args(args)).await
             })
             .await
             .map_err(|e| anyhow::anyhow!("Join error: {:?}", e))??;
-        log::error!("[CONVEX] query() got result for: {}", name);
         handle_direct_function_result(result)
     }
 
@@ -227,14 +247,12 @@ impl MobileConvexClient {
         on_update: impl Fn(String) -> DartFnFuture<()> + Send + Sync + 'static,
         on_error: impl Fn(String, Option<String>) -> DartFnFuture<()> + Send + Sync + 'static,
     ) -> Result<SubscriptionHandle, ClientError> {
-        log::error!("[CONVEX] subscribe() called for: {}", name);
+        self.assert_auth_valid()?;
         let subscriber = Arc::new(CallbackSubscriberDartFn {
             on_update: Box::new(on_update),
             on_error: Box::new(on_error),
         });
-        let result = self.internal_subscribe(name.clone(), args, subscriber).await;
-        log::error!("[CONVEX] subscribe() completed for: {}, success: {}", name, result.is_ok());
-        result.map_err(Into::into)
+        self.internal_subscribe(name, args, subscriber).await.map_err(Into::into)
     }
 
     /// Internal method for subscription logic.
@@ -244,28 +262,22 @@ impl MobileConvexClient {
         args: HashMap<String, String>,
         subscriber: Arc<dyn QuerySubscriber>,
     ) -> anyhow::Result<SubscriptionHandle> {
-        log::error!("[CONVEX] internal_subscribe - getting client for: {}", name);
         let client = self.connected_client()?;
-        log::error!("[CONVEX] internal_subscribe - got client for: {}", name);
 
         let (cancel_sender, cancel_receiver) = oneshot::channel::<()>();
-        let sub_name = name.clone();
+        let sub_name = name;
         let parsed_args = parse_json_args(args);
+        let auth_expires_at = self.auth_expires_at.clone();
+        let client_for_auth_clear = client.clone();
 
         // Spawn EVERYTHING on self.rt - subscription creation AND the loop
         self.rt.spawn(async move {
-            log::error!("[CONVEX] Inside rt.spawn - creating subscription for: {}", sub_name);
-
             // Create subscription while holding the lock, then release it
             let mut subscription = {
                 let mut client_guard = client.lock().await;
                 match client_guard.subscribe(&sub_name, parsed_args).await {
-                    Ok(sub) => {
-                        log::error!("[CONVEX] Subscription created successfully for: {}", sub_name);
-                        sub
-                    }
+                    Ok(sub) => sub,
                     Err(e) => {
-                        log::error!("[CONVEX] Failed to create subscription for {}: {:?}", sub_name, e);
                         subscriber.on_error(format!("Failed to subscribe: {:?}", e), None);
                         return;
                     }
@@ -273,28 +285,68 @@ impl MobileConvexClient {
             };
             // Lock is released here, subscription is independent
 
-            log::error!("[CONVEX] Subscription loop started for: {}", sub_name);
             let cancel_fut = cancel_receiver.fuse();
             pin_mut!(cancel_fut);
+
+            // Helper closure to check auth and clear if expired
+            let check_auth_expired = || -> bool {
+                if let Some(exp) = *auth_expires_at.lock() {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    if now >= exp {
+                        // Clear the expiration tracker
+                        *auth_expires_at.lock() = None;
+                        return true;
+                    }
+                }
+                false
+            };
+
             loop {
-                log::error!("[CONVEX] Waiting for next value for: {}", sub_name);
+                // Check if auth token has expired before waiting for next value
+                if check_auth_expired() {
+                    // Clear auth from underlying client to stop retry loop
+                    {
+                        let mut client_guard = client_for_auth_clear.lock().await;
+                        client_guard.set_auth(None).await;
+                    }
+                    subscriber.on_error(
+                        "AUTH_EXPIRED".to_string(),
+                        None,
+                    );
+                    break;
+                }
+
                 select_biased! {
                     new_val = subscription.next().fuse() => {
-                        log::error!("[CONVEX] Got value from subscription: {}", sub_name);
                         let new_val = new_val.expect("Client dropped prematurely");
+
+                        // Check auth validity again after receiving a value
+                        if check_auth_expired() {
+                            // Clear auth from underlying client to stop retry loop
+                            {
+                                let mut client_guard = client_for_auth_clear.lock().await;
+                                client_guard.set_auth(None).await;
+                            }
+                            subscriber.on_error(
+                                "AUTH_EXPIRED".to_string(),
+                                None,
+                            );
+                            break;
+                        }
+
                         match new_val {
                             FunctionResult::Value(value) => {
-                                log::error!("[CONVEX] Value received for: {}", sub_name);
                                 subscriber.on_update(serde_json::to_string(
                                     &serde_json::Value::from(value),
                                 ).unwrap());
                             }
                             FunctionResult::ErrorMessage(message) => {
-                                log::error!("[CONVEX] ErrorMessage for {}: {}", sub_name, message);
                                 subscriber.on_error(message, None);
                             }
                             FunctionResult::ConvexError(error) => {
-                                log::error!("[CONVEX] ConvexError for {}: {}", sub_name, error.message);
                                 subscriber.on_error(
                                     error.message,
                                     Some(serde_json::ser::to_string(
@@ -305,15 +357,12 @@ impl MobileConvexClient {
                         }
                     }
                     _ = cancel_fut => {
-                        log::error!("[CONVEX] Subscription cancelled: {}", sub_name);
                         break;
                     }
                 }
             }
-            log::error!("[CONVEX] Subscription loop ended: {}", sub_name);
         });
 
-        log::error!("[CONVEX] internal_subscribe - returning handle for: {}", name);
         Ok(SubscriptionHandle::new(cancel_sender))
     }
 
@@ -324,6 +373,7 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> Result<String, ClientError> {
+        self.assert_auth_valid()?;
         let result = self.internal_mutation(name, args).await?;
         handle_direct_function_result(result)
     }
@@ -351,9 +401,8 @@ impl MobileConvexClient {
         name: String,
         args: HashMap<String, String>,
     ) -> Result<String, ClientError> {
-        debug!("Running action: {}", name);
+        self.assert_auth_valid()?;
         let result = self.internal_action(name, args).await?;
-        debug!("Got action result: {:?}", result);
         handle_direct_function_result(result)
     }
 
@@ -364,7 +413,6 @@ impl MobileConvexClient {
         args: HashMap<String, String>,
     ) -> anyhow::Result<FunctionResult> {
         let client = self.connected_client()?;
-        debug!("Running action: {}", name);
         self.rt
             .spawn(async move {
                 let mut client_guard = client.lock().await;
@@ -377,6 +425,10 @@ impl MobileConvexClient {
     /// Sets authentication token for the client.
     #[frb]
     pub async fn set_auth(&self, token: Option<String>) -> Result<(), ClientError> {
+        // Parse and store the expiration time
+        let expires_at = token.as_ref().and_then(|t| Self::parse_jwt_expiration(t));
+        *self.auth_expires_at.lock() = expires_at;
+
         Ok(self.internal_set_auth(token).await?)
     }
 

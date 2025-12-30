@@ -177,7 +177,15 @@ class ConvexClient {
       name: name,
       args: args,
       onUpdate: onUpdate,
-      onError: onError,
+      onError: (message, value) {
+        // Intercept auth expiration errors from native side
+        if (message == 'AUTH_EXPIRED') {
+          final expiresAt = _authTokenExpiresAt ?? DateTime.now().toUtc();
+          _emitAuthExpired(expiresAt);
+          return;
+        }
+        onError(message, value);
+      },
     );
   }
 
